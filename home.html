@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<head>
+    <script>
+window.addEventListener("load", function(ev) {
+    var inp = document.getElementById("msg");
+    var name = document.getElementById("name");
+    var ourname;
+    var sb = document.getElementById("scoreboard");
+    var mb = document.getElementById("messageboard");
+    var playerNames = {};
+    var ws;
+    function reset() {
+        sb.innerHTML = ""
+    }
+    document.getElementById("connect").onclick = function(ev) {
+        // When we connect, we need to supply the name
+        if(name.value == "") {
+            alert("need to enter a name")
+            return false;
+        }
+        ourname = name.value
+        if (ws) return false;
+        ws = new WebSocket("{{.}}");
+        ws.onopen = function (ev) {
+            console.log("Connected to server");
+            // Send our name
+            ws.send("N"+ourname)
+        }
+        ws.onclose = function (ev) {
+            ws = null;
+            reset()
+            console.error("Disconnected from server")
+        }
+        ws.onmessage = function (ev) {
+            // See what kind of message is being sent
+            var m = ev.data.toString('utf8')
+            if (m[0] == "O") {
+                //console.log("Got name")
+                // Server is sending a different player's name
+                // First byte is their id
+                var id = ev.data.charCodeAt(1)
+                // The rest is a name
+                var n;
+                n = ev.data.slice(2).toString('utf8')
+                // Add to the element
+                sb.innerHTML += (id + ": " + n + "<br/>")
+                // add to our collection
+                playerNames[id] = n
+            }
+            else if (m[0] == "P") {
+                //console.log("Got text message")
+                // Server sent a message from a different person
+                // First byte is the player ID
+                var senderID = ev.data.charCodeAt(1)
+                // The rest of the data is the actual message
+                var m = ev.data.slice(2).toString('utf8')
+                mb.innerHTML += (playerNames[senderID] + ": " + m + "<br/>")
+            }
+            else if (m[0] == "Q") {
+                console.log("Got disconnect message")
+                var reason = ev.data.slice(1).toString('utf8')
+                ws.close()
+                // Tell the player
+                alert(reason)
+            }
+            else if (m[0] == "A") {
+                // We were accepted into the lobby!
+                mb.innerHTML += "Accepted into lobby!<br/>"
+            }
+        }
+        return false;
+    }
+    document.getElementById("send").onclick = function(ev) {
+        if (!ws) {
+            alert("need to connect first stupidhaha")
+            return false;
+        }
+        //console.log("Sending data");
+        ws.send("P"+inp.value);
+        // we will also showcase it on our side
+        mb.innerHTML += (ourname + ": " + inp.value + "<br/>")
+        return false;
+    }
+});
+    </script>
+    <title>Hello There!</title>
+    <style>
+        * {
+            font-size:large
+        }
+        .bottom {
+            position: absolute;
+            float: left;
+            left:0;
+            bottom:0;
+        }
+        div {
+            display:inline;
+        }
+        input {
+            width: 80%
+        }
+        .panel {
+            width: 40%;
+            float: left;
+            display: inline;
+            border-style: dotted;
+            border:1px;
+            border-color:blue;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <div class="panel">
+            <p>This is a test!</p>
+            <p>foo</p>
+            <label>Name:</label><br/>
+            <input id="name" type="text">
+            <button id="connect">Connect</button><br/><br/>
+            <label>Data:</label><br/>
+            <input id="msg" type="text">
+            <button id="send">Send</button><br/><br/>
+            <label>Players:</label>
+            <p id="scoreboard"></p>
+        </div>
+        <div class="panel">
+            <label>Messages:</label>
+            <p id="messageboard"></p>
+        </div>
+    </div>
+    <a class="bottom" href="/re">Refresh Document</a>
+</body>
