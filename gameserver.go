@@ -14,9 +14,11 @@ import (
 
 const bufferSize = 8
 
+// Responsible for data flow from game-logic to connection-controller
 type clientStruct struct {
 	send    chan []byte
 	recieve chan []byte
+	close   chan bool
 }
 
 var serverAddress = flag.String("addr", "localhost:8080", "The server-side address")
@@ -33,6 +35,26 @@ var upgrader = websocket.Upgrader{}
 var connectionChannel chan clientStruct
 
 var clientchan chan []byte
+
+func handleRead(c *websocket.Conn, cl clientStruct) {
+	// Recieve any messages in the channel
+	isClosed := false
+	for !isClosed {
+		select {
+		case <-cl.close:
+			isClosed = true
+			break
+		default:
+			_, message, err := c.ReadMessage()
+			if err != nil {
+				fmt.Println("Reading message error:", err, "| Maybe client disconnected?")
+				return
+			}
+			//fmt.Printf("Recieved | message type: %d | message : %s\n", messageType, message)
+			cl.recieve <- message
+		}
+	}
+}
 
 func gamesession(w http.ResponseWriter, r *http.Request) {
 	// Check to see if we are accepting more players
@@ -58,34 +80,29 @@ func gamesession(w http.ResponseWriter, r *http.Request) {
 	rc := make(chan []byte, bufferSize)
 	cl := clientStruct{
 		send:    sd,
-		recieve: rc}
+		recieve: rc,
+		close:   make(chan bool, 1),
+	}
 
+	// Add this client to the connections
 	connectionChannel <- cl
 
 	// Send any messages in the channel
-	go func() {
+	go func(cl clientStruct) {
 		for {
-			data := <-sd
+			data := <-cl.send
 			err = c.WriteMessage(websocket.TextMessage, data)
 			if err != nil {
 				fmt.Printf("Failed to send message %s, error: %s\n", data, err)
 				break
 			}
 		}
-	}()
-
-	// Recieve any messages in the channel
-	for {
-		_, message, err := c.ReadMessage()
-		if err != nil {
-			fmt.Println("Reading message error:", err, "| Maybe client disconnected?")
-			break
-		}
-		//fmt.Printf("Recieved | message type: %d | message : %s\n", messageType, message)
-		rc <- message
-	}
-
-	fmt.Println("Disconnect!")
+	}(cl)
+	// Do the read as well
+	handleRead(c, cl)
+	// Need to push a final disconnect message to the logic (just in case)
+	cl.recieve <- []byte{leave}
+	fmt.Println("client handler: Disconnect!")
 }
 
 func refresh(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +134,6 @@ func main() {
 	loadPages()
 
 	// Create the global channel
-	clientchan = make(chan []byte)
 	connectionChannel = make(chan clientStruct)
 
 	// Start the server
@@ -154,15 +170,16 @@ type player struct {
 }
 
 const (
-	accepted  byte = 65
-	name      byte = 78
-	othername byte = 79
-	message   byte = 80
-	leave     byte = 81
+	accepted   byte = 65
+	name       byte = 78
+	othername  byte = 79
+	message    byte = 80
+	leave      byte = 81
+	otherleave byte = 82
 )
 
 const startPlayers = 2
-const maxPlayers = 3
+const maxPlayers = 2
 
 // Handle players joining/leaving the game
 // Returns true if a new player joins
@@ -173,6 +190,11 @@ func lobby(joinChannel chan clientStruct, players *[]player, maxID int) bool {
 		// A player joined
 		// See if we have space to accept them
 		if len(*players) < maxPlayers {
+			// Every time a player joins,
+			// we assign an ID
+			// we create a struct
+			// we expect to see a name
+			// When we get a name, send it to the other players
 			// We can accept the player
 			// We expect a name message
 			data := <-cli.recieve
@@ -199,7 +221,6 @@ func lobby(joinChannel chan clientStruct, players *[]player, maxID int) bool {
 			for _, otherp := range *players {
 				otherp.client.send <- msg
 			}
-			fmt.Println(msg)
 			// Now send all the other player's names to this new player!
 			for _, otherp := range *players {
 				bname = stringToBytes(otherp.name)
@@ -213,83 +234,47 @@ func lobby(joinChannel chan clientStruct, players *[]player, maxID int) bool {
 		} else {
 			// we cannot accept the player
 			// Send a disconnect message to them
-			cli.send <- []byte((string(leave) + "Session is full"))
+			disconnect(cli, "Session is full")
 		}
 	default:
 	}
 	return false
 }
 
+func disconnect(cli clientStruct, message string) {
+	select {
+	case cli.send <- []byte(string(leave) + message):
+	default:
+		fmt.Println("game: Failed to send disconnect message")
+	}
+	cli.close <- true
+}
+
 func playGame(joinChannel chan clientStruct) {
 	// The first thing we need to do is wait for enough players to join.
 	players := make([]player, 0)
 
-	// Every time a player joins,
-	// we assign an ID
-	// we create a struct
-	// we expect to see a name
-	// When we get a name, send it to the other players
-
-	/*
-		doAcceptPlayers = true
-		for len(players) < startPlayers {
-			cli := <-joinChannel
-			// We now expect a "player name" message from them right away
-			data := <-cli.recieve
-			// Check to make sure it's the right "message type"
-			if data[0] != name {
-				// We need to error out
-				fmt.Println("Rejected player for bad name connect")
-				cli.send <- getDisconnect()
-				continue
-			}
-			pname := string(data[1:])
-			p := player{
-				client: cli,
-				name:   pname,
-				id:     byte(len(players)),
-			}
-			p.client.send <- []byte("hello!")
-
-			// Send this player to all the connected players!
-			bname := stringToBytes(pname)
-			msg := append(make([]byte, 2), bname...)
-			msg[0] = othername
-			msg[1] = p.id
-			for _, otherp := range players {
-				otherp.client.send <- msg
-			}
-			fmt.Println(msg)
-			// Now send all the other player's names to this new player!
-			for _, otherp := range players {
-				bname = stringToBytes(otherp.name)
-				msg = append(make([]byte, 2), bname...)
-				msg[0] = othername
-				msg[1] = otherp.id
-				p.client.send <- msg
-			}
-			players = append(players, p)
-		}
-		doAcceptPlayers = false
-		fmt.Println(players)
-		fmt.Println("Starting game!")
-	*/
-
+	// Set up the ID counter
 	var id int = 0
+
+	// Accept players until the game is full
 	for len(players) < startPlayers {
 		if lobby(joinChannel, &players, id) {
 			id++
 		}
 	}
 
+	// Now we can start the loop
 	for {
 		// Let's try and recieve a message from every client now
+		breakup := false
 		for currentIndex, p := range players {
 			consumeMore := true
 			for consumeMore {
 				select {
 				case msg := <-p.client.recieve:
-					fmt.Println(p.name, ":", string(msg)[1:])
+					// We recieved a message
+					//fmt.Println(p.name, ":", string(msg)[1:])
 					// See if the client message is a "message" type
 					if msg[0] == message {
 						// User sent a message. We need to send this message to all other clients
@@ -303,17 +288,38 @@ func playGame(joinChannel chan clientStruct) {
 							}
 						}
 					}
+					// We need to handle a disconnect message (whether it be internal or from the client)
+					if msg[0] == leave {
+						// This user has disconnected (for whatever reason)
+						// Send a message to all the other players about what has happened
+						msg := []byte{otherleave, p.id}
+						for pIndex, otherP := range players {
+							if currentIndex != pIndex {
+								otherP.client.send <- msg
+							}
+						}
+						// Remove them from players
+						// We move the last element to this position, then resize the array
+						players[currentIndex] = players[len(players)-1]
+						players = players[:len(players)-1]
+						// Now, I think we need to break to ensure we don't break any indexing rules
+						breakup = true
+					}
 				default:
 					consumeMore = false
 				}
+				if breakup {
+					break
+				}
 			}
-			// Let's also continue to manage the lobby
-			if lobby(joinChannel, &players, id) {
-				id++
+			if breakup {
+				break
 			}
 		}
-		//timer := time.NewTimer(5 * time.Second)
-		//<-timer.C
+		// Let's also continue to manage the lobby
+		if lobby(joinChannel, &players, id) {
+			id++
+		}
 	}
 
 }
@@ -325,8 +331,4 @@ func stringToBytes(s string) []byte {
 		c += utf8.EncodeRune(bts[c:], r)
 	}
 	return bts[:c]
-}
-
-func getDisconnect() []byte {
-	return []byte("server is sending disconnect")
 }

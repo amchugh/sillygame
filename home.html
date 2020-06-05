@@ -59,7 +59,7 @@ window.addEventListener("load", function(ev) {
             else if (m[0] == "Q") {
                 console.log("Got disconnect message")
                 var reason = ev.data.slice(1).toString('utf8')
-                ws.close()
+                ws.close() // For testing... todo::remove
                 // Tell the player
                 alert(reason)
             }
